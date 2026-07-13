@@ -6,12 +6,11 @@ import logging
 import asyncio
 import random
 import sqlite3
-import datetime
+import string
+import telethon
 from datetime import datetime, timedelta
 import aiosqlite
-import telethon
 from telethon import TelegramClient, events, functions, types, Button
-from telethon.errors import FloodWaitError
 
 # --- 🔍 FUZZY MATCHING LOGIC & STRING UTILS 🔍 ---
 def clean_string(text):
@@ -53,13 +52,11 @@ API_ID = 35485985
 API_HASH = '5441c09a9c8bf58374e1f8f227b95794'     
 BOT_TOKEN = '8791980160:AAGU4JwkQXL1dxgRqVUxgeARJROwLfL19g4'   
 ADMIN_ID = 7952327997                 
+LOG_CHANNEL_ID = -1003559645437
 
 REQUIRED_CHANNELS = [
     {"id": -1003985304953, "link": "https://t.me/yagamicorporation"},
 ]       
-
-LOG_CHANNEL_ID = -1003559645437
-LOG_CHANNEL_INVITE = "https://t.me/+szJCMQ1z5d0wNTdl"
 
 CHANNEL_A_ID = -1002107962104
 CHANNEL_B_ID = -1003943845412
@@ -75,39 +72,12 @@ DB_ENGINE_C = os.path.join(SCRIPT_DIR, "ritsamhub1.db")
 DB_ENGINE_D = os.path.join(SCRIPT_DIR, "ritsamhub3.db")  
 DB_ENGINE_E = os.path.join(SCRIPT_DIR, "ritsamhub48.db")  
 
-client = TelegramClient('movie_quad_session', API_ID, API_HASH, receive_updates=False)
+client = TelegramClient('movie_quad_session', API_ID, API_HASH)
 
 PAGINATION_CACHE = {}
+CAPTCHA_CACHE = {}
+COUPON_INPUT_CACHE = {}
 BACKUP_ABORT_SIGNAL = {"abort": False}
-CAPTCHA_SESSIONS = {}
-COUPON_INPUT_STATE = set()
-
-CAPTCHA_POOL = [
-    {"q": "8 * 1", "a": "8"},
-    {"q": "12 / 4", "a": "3"},
-    {"q": "9 + 5", "a": "14"},
-    {"q": "15 - 7", "a": "8"},
-    {"q": "6 * 2", "a": "12"},
-    {"q": "20 / 5", "a": "4"},
-    {"q": "14 + 6", "a": "20"},
-    {"q": "18 - 9", "a": "9"},
-    {"q": "7 * 3", "a": "21"},
-    {"q": "16 / 2", "a": "8"}
-]
-
-def update_filesystem_heartbeat(status_message):
-    try:
-        progress_path = os.path.join(SCRIPT_DIR, "progress.txt")
-        with open(progress_path, "w", encoding="utf-8") as f:
-            f.write(f"{datetime.now().isoformat()} - {status_message}\n")
-    except Exception as e:
-        logger.error(f"Failed to update progress filesystem metrics: {e}")
-
-async def dispatch_log(text):
-    try:
-        await client.send_message(LOG_CHANNEL_ID, f"📢 **SYSTEM AUDIT LOG**\n⏳ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n{text}")
-    except Exception as e:
-        logger.error(f"Failed dispatching audit stream to log channel: {e}")
 
 # ====================================================================
 #                   🗄️ QUAD DATABASE MANAGEMENT ENGINE
@@ -115,7 +85,6 @@ async def dispatch_log(text):
 class DatabaseManager:
     @staticmethod
     async def initialize():
-        update_filesystem_heartbeat("Initializing Cluster Core Storage Map")
         async with aiosqlite.connect(DB_CORE) as db:
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS users (
@@ -133,6 +102,12 @@ class DatabaseManager:
                     verified INTEGER DEFAULT 0
                 )
             """)
+            
+            try:
+                await db.execute("ALTER TABLE users ADD COLUMN verified INTEGER DEFAULT 0")
+                await db.commit()
+            except sqlite3.OperationalError: pass
+
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS payments (
                     tx_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -144,36 +119,34 @@ class DatabaseManager:
                 )
             """)
             await db.execute("""
-                CREATE TABLE IF NOT EXISTS system_config (
-                    key TEXT PRIMARY KEY,
-                    val TEXT
-                )
-            """)
-            await db.execute("""
                 CREATE TABLE IF NOT EXISTS coupons (
                     code TEXT PRIMARY KEY,
+                    quota_reward INTEGER,
                     max_uses INTEGER,
                     current_uses INTEGER DEFAULT 0,
-                    quota_reward INTEGER
+                    expiry_date TEXT
                 )
             """)
+            
+            try:
+                await db.execute("ALTER TABLE coupons ADD COLUMN expiry_date TEXT")
+                await db.commit()
+                logger.info("🔧 Migration Patch Applied: 'expiry_date' safely structuralized inside coupons schema.")
+            except sqlite3.OperationalError: pass
+            
             await db.execute("""
-                CREATE TABLE IF NOT EXISTS coupon_history (
+                CREATE TABLE IF NOT EXISTS coupon_logs (
                     user_id TEXT,
                     code TEXT,
                     timestamp TEXT,
                     PRIMARY KEY (user_id, code)
                 )
             """)
+            await db.execute("CREATE TABLE IF NOT EXISTS android_metadata (locale TEXT)")
             
-            # Seed configurations
-            configs = [
-                ('price_Silver', '29'), ('price_Gold', '49'), ('price_Elite', '149'),
-                ('limit_Free', '5'), ('limit_Silver', '30'), ('limit_Gold', '60'), ('limit_Elite', '300')
-            ]
-            for k, v in configs:
-                await db.execute("INSERT OR IGNORE INTO system_config (key, val) VALUES (?, ?)", (k, v))
-                
+            async with db.execute("SELECT COUNT(*) FROM android_metadata") as cursor:
+                if (await cursor.fetchone())[0] == 0:
+                    await db.execute("INSERT INTO android_metadata (locale) VALUES ('en_US')")
             await db.commit()
 
         channel_dbs = [DB_ENGINE_A, DB_ENGINE_B, DB_ENGINE_C, DB_ENGINE_D, DB_ENGINE_E]
@@ -191,21 +164,7 @@ class DatabaseManager:
                 await db.execute(f"CREATE INDEX IF NOT EXISTS idx_movies_vector_{idx} ON movies(search_vector);")
                 await db.commit()
             
-        logger.info("⚡ Live 5-Engine Storage Clusters successfully mounted and fully synchronized.")
-        update_filesystem_heartbeat("Databases Mount Completed Successfully")
-
-    @staticmethod
-    async def get_config(key: str, default: str) -> str:
-        async with aiosqlite.connect(DB_CORE) as db:
-            async with db.execute("SELECT val FROM system_config WHERE key = ?", (key,)) as cursor:
-                row = await cursor.fetchone()
-                return row[0] if row else default
-
-    @staticmethod
-    async def set_config(key: str, val: str):
-        async with aiosqlite.connect(DB_CORE) as db:
-            await db.execute("INSERT OR REPLACE INTO system_config (key, val) VALUES (?, ?)", (key, val))
-            await db.commit()
+        logger.info("⚡ Live 5-Engine Storage Clusters successfully mounted and synchronized.")
 
     @staticmethod
     async def register_user(user_id: str, username: str, referrer_id: str = None):
@@ -218,20 +177,23 @@ class DatabaseManager:
                     await DatabaseManager.verify_daily_reset(user_id)
                     return False
             
-            free_baseline = int(await DatabaseManager.get_config('limit_Free', '5'))
             await db.execute("""
                 INSERT INTO users (user_id, username, plan, searches_today, max_limit, referral_count, referred_by, last_reset_date, banned, premium_expiry, verified)
-                VALUES (?, ?, 'Free', 0, ?, 0, ?, ?, 0, 'Never', 0)
-            """, (user_id, username, free_baseline, referrer_id, today))
-            if referrer_id:
-                await db.execute("UPDATE users SET max_limit = max_limit + 5, referral_count = referral_count + 1 WHERE user_id = ?", (referrer_id,))
+                VALUES (?, ?, 'Free', 0, 5, 0, ?, ?, 0, 'Never', 0)
+            """, (user_id, username, referrer_id, today))
             await db.commit()
             return True
 
     @staticmethod
-    async def verify_user_captcha(user_id: str):
+    async def set_verified(user_id: str):
         async with aiosqlite.connect(DB_CORE) as db:
             await db.execute("UPDATE users SET verified = 1 WHERE user_id = ?", (user_id,))
+            await db.commit()
+
+    @staticmethod
+    async def apply_referral_credit(referrer_id: str):
+        async with aiosqlite.connect(DB_CORE) as db:
+            await db.execute("UPDATE users SET max_limit = max_limit + 5, referral_count = referral_count + 1 WHERE user_id = ?", (referrer_id,))
             await db.commit()
 
     @staticmethod
@@ -244,7 +206,8 @@ class DatabaseManager:
                     await DatabaseManager.verify_daily_reset(user_id)
                     await DatabaseManager.check_premium_expiry(user_id)
                     async with db.execute("SELECT * FROM users WHERE user_id = ?", (user_id,)) as fresh_cursor:
-                        return await fresh_cursor.fetchone()
+                        res = await fresh_cursor.fetchone()
+                        return dict(res) if res else None
                 return None
 
     @staticmethod
@@ -254,8 +217,10 @@ class DatabaseManager:
             async with db.execute("SELECT last_reset_date, plan FROM users WHERE user_id = ?", (user_id,)) as cursor:
                 row = await cursor.fetchone()
                 if row and row[0] != today:
-                    plan = row[1]
-                    base_limit = int(await DatabaseManager.get_config(f'limit_{plan}', '5'))
+                    base_limit = 5
+                    if row[1] == 'Silver': base_limit = 30
+                    elif row[1] == 'Gold': base_limit = 60
+                    elif row[1] == 'Elite': base_limit = 300
                     await db.execute("UPDATE users SET searches_today = 0, last_reset_date = ?, max_limit = MAX(max_limit, ?) WHERE user_id = ?", (today, base_limit, user_id))
                     await db.commit()
 
@@ -268,14 +233,13 @@ class DatabaseManager:
                     try:
                         expiry = datetime.strptime(row[1], "%Y-%m-%d").date()
                         if datetime.now().date() > expiry:
-                            free_baseline = int(await DatabaseManager.get_config('limit_Free', '5'))
-                            await db.execute("UPDATE users SET plan = 'Free', max_limit = ?, premium_expiry = 'Never' WHERE user_id = ?", (free_baseline, user_id))
+                            await db.execute("UPDATE users SET plan = 'Free', max_limit = 5, premium_expiry = 'Never' WHERE user_id = ?", (user_id,))
                             await db.commit()
-                            await dispatch_log(f"📉 **Plan Expired**: User `{user_id}` reverted back to Free rank.")
                     except Exception: pass
 
     @staticmethod
     async def increment_search(user_id: str):
+        if int(user_id) == ADMIN_ID: return
         async with aiosqlite.connect(DB_CORE) as db:
             await db.execute("UPDATE users SET searches_today = searches_today + 1 WHERE user_id = ?", (user_id,))
             await db.commit()
@@ -305,6 +269,43 @@ class DatabaseManager:
         async with aiosqlite.connect(DB_CORE) as db:
             await db.execute("UPDATE payments SET status = ? WHERE user_id = ? AND plan_name = ? AND status = 'Pending'", (status, user_id, plan_name))
             await db.commit()
+
+    @staticmethod
+    async def create_coupon(code: str, quota: int, max_uses: int, expiry_days: int = 365):
+        async with aiosqlite.connect(DB_CORE) as db:
+            exp_str = str((datetime.now() + timedelta(days=expiry_days)).date())
+            await db.execute("""
+                INSERT OR REPLACE INTO coupons (code, quota_reward, max_uses, current_uses, expiry_date)
+                VALUES (?, ?, ?, 0, ?)
+            """, (code, quota, max_uses, exp_str))
+            await db.commit()
+
+    @staticmethod
+    async def redeem_coupon(user_id: str, code: str):
+        async with aiosqlite.connect(DB_CORE) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute("SELECT * FROM coupons WHERE code = ?", (code,)) as cursor:
+                coupon = await cursor.fetchone()
+                if not coupon: return "INVALID"
+                
+            today = datetime.now().date()
+            if coupon['expiry_date']:
+                try:
+                    if datetime.strptime(coupon['expiry_date'], "%Y-%m-%d").date() < today:
+                        return "EXPIRED"
+                except Exception: pass
+                
+            if coupon['current_uses'] >= coupon['max_uses']:
+                return "MAXED"
+                
+            async with db.execute("SELECT * FROM coupon_logs WHERE user_id = ? AND code = ?", (user_id, code)) as log_c:
+                if await log_c.fetchone(): return "ALREADY_USED"
+                
+            await db.execute("INSERT INTO coupon_logs (user_id, code, timestamp) VALUES (?, ?, ?)", (user_id, code, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+            await db.execute("UPDATE coupons SET current_uses = current_uses + 1 WHERE code = ?", (code,))
+            await db.execute("UPDATE users SET max_limit = max_limit + ? WHERE user_id = ?", (coupon['quota_reward'], user_id))
+            await db.commit()
+            return coupon['quota_reward']
 
     @staticmethod
     async def cache_movie(msg_id: int, name: str, size: int, source_channel: int):
@@ -357,18 +358,6 @@ class DatabaseManager:
         return [dict(item, origin_db=origin) for score, item, origin in results]
 
     @staticmethod
-    async def get_trending_movies():
-        trending_pool = []
-        for db_engine in [DB_ENGINE_A, DB_ENGINE_B, DB_ENGINE_C, DB_ENGINE_D, DB_ENGINE_E]:
-            async with aiosqlite.connect(db_engine) as db:
-                db.row_factory = aiosqlite.Row
-                async with db.execute("SELECT * FROM movies WHERE search_count > 0 ORDER BY search_count DESC LIMIT 3") as cursor:
-                    for r in await cursor.fetchall():
-                        trending_pool.append(dict(r, origin_db=db_engine))
-        trending_pool.sort(key=lambda x: x['search_count'], reverse=True)
-        return trending_pool[:5]
-
-    @staticmethod
     async def increment_movie_download(msg_id: int, origin_db: str):
         async with aiosqlite.connect(origin_db) as db:
             await db.execute("UPDATE movies SET search_count = search_count + 1 WHERE msg_id = ?", (msg_id,))
@@ -396,13 +385,6 @@ class DatabaseManager:
         return total_u, movies_a, movies_b, movies_c, movies_d, movies_e, ban_u, pend_p, prem_u
 
     @staticmethod
-    async def get_top_referrers():
-        async with aiosqlite.connect(DB_CORE) as db:
-            db.row_factory = aiosqlite.Row
-            async with db.execute("SELECT username, user_id, referral_count FROM users ORDER BY referral_count DESC LIMIT 5") as cursor:
-                return await cursor.fetchall()
-
-    @staticmethod
     async def set_user_ban_status(user_id: str, status: int):
         async with aiosqlite.connect(DB_CORE) as db:
             await db.execute("UPDATE users SET banned = ? WHERE user_id = ?", (status, user_id))
@@ -428,6 +410,12 @@ async def check_membership(user_id: int) -> bool:
             return False
     return True
 
+async def forward_to_log_channel(html_text: str):
+    try:
+        await client.send_message(LOG_CHANNEL_ID, html_text, parse_mode='html')
+    except Exception as e:
+        logger.error(f"Failed to transmit log dispatch vector: {e}")
+
 async def scheduled_file_destruction(chat_id, raw_file_msg, alert_notice_msg):
     await asyncio.sleep(60)
     try:
@@ -436,19 +424,41 @@ async def scheduled_file_destruction(chat_id, raw_file_msg, alert_notice_msg):
         pass
 
 # ====================================================================
-#                      🤖 USER CONTROLLER COMMANDS
+#               ⌨️ PERSISTENT REPLY KEYBOARD INTERFACE MAP
 # ====================================================================
-def build_main_keyboard():
-    return [
-        ['🔍 Search Movies', '👥 Invite Friends'],
-        ['🛒 Buy Premium', '🎫 Redeem Token'],
-        ['👤 View Profile', '📖 Instruction Guide']
-    ]
+def generate_keyboard_workspace_layout():
+    return types.ReplyKeyboardMarkup(
+        rows=[
+            types.KeyboardButtonRow(buttons=[
+                types.KeyboardButton(text="🔗 Generate Affiliate Link"),
+                types.KeyboardButton(text="📖 System Instructions Manual")
+            ]),
+            types.KeyboardButtonRow(buttons=[
+                types.KeyboardButton(text="👤 Profile Metrics"),
+                types.KeyboardButton(text="🎁 Free Daily Token")
+            ]),
+            types.KeyboardButtonRow(buttons=[
+                types.KeyboardButton(text="🎟️ Redeem Coupon Voucher"),
+                types.KeyboardButton(text="👑 Upgrade Premium Tiers")
+            ])
+        ],
+        resize=True,
+        persistent=True
+    )
+
+# ====================================================================
+#                      🤖 CAPTCHA & USER ROUTING
+# ====================================================================
+def generate_math_captcha():
+    n1 = random.randint(1, 9)
+    n2 = random.randint(1, 9)
+    return n1, n2, n1 + n2
 
 @client.on(events.NewMessage(pattern='/start'))
 async def on_start_command(event):
     user_id = str(event.sender_id)
     username = event.sender.username or "Anonymous"
+    
     payload = event.message.message.split(' ')
     referrer_id = payload[1] if len(payload) > 1 and payload[1].isdigit() else None
     if referrer_id == user_id: referrer_id = None
@@ -460,179 +470,141 @@ async def on_start_command(event):
     
     user_data = await DatabaseManager.get_user(user_id)
     if user_data and user_data['verified'] == 0:
-        captcha_obj = random.choice(CAPTCHA_POOL)
-        CAPTCHA_SESSIONS[user_id] = captcha_obj['a']
-        await event.reply(
-            f"🛡️ **SECURITY GATEWAY INTEGRITY VERIFICATION**\n\n"
-            f"Solve the mathematical matrix task expression below to unlock full client options:\n"
-            f"👉 **Question**: `{captcha_obj['q']} = ?`",
-            parse_mode='markdown'
+        n1, n2, answer = generate_math_captcha()
+        CAPTCHA_CACHE[user_id] = {"answer": answer, "ref": referrer_id, "username": username}
+        
+        captcha_ui = (
+            f"🛡️ *SECURITY VERIFICATION REQUIRED*\n\n"
+            f"To access the clustered systems infrastructure, prove you are human.\n"
+            f"Solve: `{n1} + {n2} = ?`"
         )
+        await event.reply(captcha_ui, parse_mode='markdown')
         return
 
-    if reg_status and referrer_id:
-        try: 
-            await client.send_message(int(referrer_id), f"🔔 *Referral Event!*\n\nA new node registered via your affiliate link.\n➕5 Token Limits permanently credited!")
-            await dispatch_log(f"👥 **Referral Chain Linked**: User `{user_id}` joined under Referrer `{referrer_id}`.")
-        except Exception: pass
-    elif reg_status:
-        await dispatch_log(f"🆕 **Organic Node Entry**: User `{user_id}` (@{username}) logged into CORE system storage.")
+    await send_advanced_dashboard(event.chat_id, user_id)
 
-    await show_dashboard(event.chat_id, user_id)
-
-async def show_dashboard(chat_id, user_id):
-    user_data = await DatabaseManager.get_user(user_id)
-    dashboard_ui = (
-        f"💎 **ULTIMATE SYSTEM HUBCONSOLE v3.0** 💎\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"🎖️ **Tier Privilege Status** : 👑 `{user_data['plan']}`\n"
-        f"📊 **Usage Token Loadout**: ⚡ `{user_data['searches_today']}` / `{user_data['max_limit']}` Allocations\n"
-        f"⏳ **Limit Resets**: 🔄 Automatic Daily Refresh Control Sequence\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"💡 **Dynamic Actions Ready**: Interact with the Control Matrix Keyboard underneath."
-    )
-    await client.send_message(chat_id, dashboard_ui, buttons=build_main_keyboard(), parse_mode='markdown')
-
-# ====================================================================
-#                   ⚡ TEXT MATRIX KEYBOARD INTERCEPTOR
-# ====================================================================
-@client.on(events.NewMessage)
-async def keyboard_text_router(event):
-    if not event.text or event.text.startswith('/'): return
-    user_id = str(event.sender_id)
-    
-    # Captcha interception check
-    if user_id in CAPTCHA_SESSIONS:
-        expected = CAPTCHA_SESSIONS[user_id]
-        if event.text.strip() == expected:
-            del CAPTCHA_SESSIONS[user_id]
-            await DatabaseManager.verify_user_captcha(user_id)
-            await event.reply("✅ **Verification Passed Successfully!** Access initialized.")
-            await show_dashboard(event.chat_id, user_id)
-        else:
-            captcha_obj = random.choice(CAPTCHA_POOL)
-            CAPTCHA_SESSIONS[user_id] = captcha_obj['a']
-            await event.reply(f"❌ **Incorrect Verification Matrix!** Try again:\n👉 **Question**: `{captcha_obj['q']} = ?`")
-        return
-
+async def send_advanced_dashboard(chat_id, user_id, confirmation_msg=None):
     user_data = await DatabaseManager.get_user(user_id)
     if not user_data: return
-    if user_data['banned'] == 1: return
-    if user_data['verified'] == 0: return
 
-    # Coupon entry interceptor logic
-    if user_id in COUPON_INPUT_STATE:
-        COUPON_INPUT_STATE.remove(user_id)
-        entered_code = event.text.strip()
-        
-        async with aiosqlite.connect(DB_CORE) as db:
-            async with db.execute("SELECT max_uses, current_uses, quota_reward FROM coupons WHERE code = ?", (entered_code,)) as c:
-                coupon = await c.fetchone()
-                
-            if not coupon:
-                await event.reply("❌ **Invalid Token / Coupon Code Structure. Transaction aborted.**")
-                return
-                
-            max_u, curr_u, reward = coupon
-            if curr_u >= max_u:
-                await event.reply("⏳ **This coupon code allocation ceiling has expired.**")
-                await dispatch_log(f"⚠️ **Expired Coupon Attempt**: User `{user_id}` hit dead code `{entered_code}`.")
-                return
-                
-            async with db.execute("SELECT 1 FROM coupon_history WHERE user_id = ? AND code = ?", (user_id, entered_code)) as h:
-                if await h.fetchone():
-                    await event.reply("🔒 **Identity Validation Error: You have already redeemed this promo block resource node.**")
-                    return
-                    
-            # Process redeem action
-            await db.execute("UPDATE coupons SET current_uses = current_uses + 1 WHERE code = ?", (entered_code,))
-            await db.execute("INSERT INTO coupon_history (user_id, code, timestamp) VALUES (?, ?, ?)", (user_id, entered_code, datetime.now().isoformat()))
-            await db.commit()
-            
-            await DatabaseManager.update_user_reward(user_id, reward, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-            await event.reply(f"🎉 **Coupon Code Redeemed Successfully!**\n⚡ `+{reward}` Search tokens permanently injected into your core profile layer capacity!")
-            await dispatch_log(f"🎫 **Coupon Redeemed**: User `{user_id}` optimized profile using coupon `{entered_code}` (+{reward} capacity).")
-            return
+    is_admin = int(user_id) == ADMIN_ID
+    usage_text = "♾️ Unlimited Tokens" if is_admin else f"⚡ `{user_data['searches_today']}` / `{user_data['max_limit']}` Searches"
 
-    # Native control route redirection
-    selection = event.text
-    if selection == '🔍 Search Movies':
-        await event.reply("💡 **Catalog Search Prompt**: Simply send your clear search keyword text phrase right into this layout console space container!")
-        
-    elif selection == '👥 Invite Friends':
+    welcome_ui = (
+        f"💎 *QUAD-ENGINE INTERLINKED STREAM CORE v3.5* 💎\n"
+        f"━━━━━━━⚙️ Account Framework ⚙️━━━━━━━\n"
+        f"🎖️ **Tier Status** :  👑 `{user_data['plan'] if not is_admin else 'Executive Admin'}`\n"
+        f"📊 **Usage Token**:  {usage_text}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"💬 **Instructions**: Send any media title down below to scan files across multiple structural data servers.\n\n"
+        f"🕹️ *All functional operational triggers are available directly at the side of your keyboard panel container bellow.*"
+    )
+
+    await client.send_message(
+        chat_id, 
+        welcome_ui, 
+        buttons=generate_keyboard_workspace_layout(), 
+        parse_mode='markdown'
+    )
+
+@client.on(events.NewMessage(pattern='/menu'))
+async def on_menu_command(event):
+    user_id = str(event.sender_id)
+    user_data = await DatabaseManager.get_user(user_id)
+    if user_data and user_data['verified'] == 1:
+        await send_advanced_dashboard(event.chat_id, user_id)
+
+# ====================================================================
+#             ⚙️ HARDWARE KEYBOARD EVENT HANDLING SYSTEM
+# ====================================================================
+@client.on(events.NewMessage)
+async def process_keyboard_menu_commands(event):
+    if not event.text: return
+    user_id = str(event.sender_id)
+    user_data = await DatabaseManager.get_user(user_id)
+    if not user_data or user_data['banned'] == 1 or user_data['verified'] == 0: return
+
+    action_text = event.text.strip()
+
+    if action_text == "🔗 Generate Affiliate Link":
         bot_identity = await client.get_me()
         ref_link = f"https://t.me/{bot_identity.username}?start={user_id}"
-        invite_ui = (
-            f"🤝 **AFFILIATE TRACK & NODE REVENUE INTERFACE**\n"
+        ref_ui = (
+            f"🔗 *YOUR AFFILIATE REFERRAL LINK*\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"🔗 Share your structural node access entry point string with colleagues:\n"
             f"`{ref_link}`\n\n"
-            f"🎁 Earn **+5 Search limits** instantly inside system core parameters for each validated user registration pass."
+            f"👥 **Current Network Connections**: `{user_data['referral_count']}` Users Joined.\n"
+            f"🎁 **Reward Multiplier**: Earn `+5` search query credits permanently for each valid human node verified using your identifier link container!"
         )
-        await event.reply(invite_ui, parse_mode='markdown')
+        await event.reply(ref_ui, parse_mode='markdown')
 
-    elif selection == '🛒 Buy Premium':
-        s_price = await DatabaseManager.get_config('price_Silver', '29')
-        g_price = await DatabaseManager.get_config('price_Gold', '49')
-        e_price = await DatabaseManager.get_config('price_Elite', '149')
-        
-        upgrade_ui = (
-            f"💎 **PREMIUM ALLOCATION TIERS & SERVICE passes**\n"
+    elif action_text == "📖 System Instructions Manual":
+        instructions_ui = (
+            f"📖 *STREAM CORE OPERATIONAL WORKSPACE INSTRUCTIONS*\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"🥈 **Silver Pass Variant Bundle**\n"
-            f"💰 Investment Value: `₹{s_price} INR` / `50 Telegram Stars` per 30 Days\n\n"
-            f"🥇 **Gold Pass Variant Bundle**\n"
-            f"💰 Investment Value: `₹{g_price} INR` / `100 Telegram Stars` per 30 Days\n\n"
-            f"👑 **Elite Mega Pass Bundle**\n"
-            f"💰 Investment Value: `₹{e_price} INR` / `250 Telegram Stars` per 30 Days\n"
+            f"1️⃣ **Searching Files**: Simply type the name of the movie or media text pattern string into the entry layout context window container and press send.\n\n"
+            f"2️⃣ **Dynamic Extraction**: The system queries 5 unified data cluster storage units. Click the item button inside the menu pagination system to stream the data packet vector.\n\n"
+            f"3️⃣ **Cache Purging**: To ensure optimized network performance arrays, dispatched file vectors self-destruct within 60 seconds. Forward them to private storage configurations immediately."
         )
-        buttons = [
-            [Button.inline(f"🥈 Silver (₹{s_price})", f"pay_Silver_{s_price}"), Button.inline("⭐️ Silver (50★)", b"stars_Silver_50")],
-            [Button.inline(f"🥇 Gold (₹{g_price})", f"pay_Gold_{g_price}"), Button.inline("⭐️ Gold (100★)", b"stars_Gold_100")],
-            [Button.inline(f"👑 Elite (₹{e_price})", f"pay_Elite_{e_price}"), Button.inline("⭐️ Elite (250★)", b"stars_Elite_250")]
-        ]
-        await event.reply(upgrade_ui, buttons=buttons, parse_mode='markdown')
+        await event.reply(instructions_ui, parse_mode='markdown')
 
-    elif selection == '🎫 Redeem Token':
-        # Fetch last structural execution token code entry parameters for safety confirmation metrics
-        async with aiosqlite.connect(DB_CORE) as db:
-            async with db.execute("SELECT code, timestamp FROM coupon_history WHERE user_id = ? ORDER BY timestamp DESC LIMIT 1", (user_id,)) as c:
-                last_node = await c.fetchone()
-        
-        history_str = f"`{last_node[0]}` (Executed: {last_node[1]})" if last_node else "_No historical coupon transactions located._"
-        COUPON_INPUT_STATE.add(user_id)
-        await event.reply(
-            f"🎫 **PROMO RESOURCE COUPON FORGE PIPELINE**\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"⏮️ **Last Verified Action**: {history_str}\n\n"
-            f"✍️ **Action Required**: Please write/input your alphanumeric token sequence key here down below now:"
-        )
-
-    elif selection == '👤 View Profile':
+    elif action_text == "👤 Profile Metrics":
+        is_admin = int(user_id) == ADMIN_ID
+        usage_text = "♾️ Unlimited Balance" if is_admin else f"`{user_data['searches_today']}` / `{user_data['max_limit']}` Tokens Used"
         profile_ui = (
-            f"👤 **USER STRUCTURAL METRICS PROFILED**\n"
+            f"👤 *USER INFRASTRUCTURE METRICS*\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"🔑 **Unique Reference Key ID** : `{user_id}`\n"
-            f"🏅 **System Priority Rank**   : `★ {user_data['plan']} Plan Tier`\n"
-            f"⚡ **Token Performance Density**: `{user_data['searches_today']}` / `{user_data['max_limit']}` Loads Exhausted\n"
-            f"🤝 **Affiliate Vector Connections**: `{user_data['referral_count']}` Node Links\n"
-            f"⏳ **Subscription End Line**  : `{user_data['premium_expiry']}`"
+            f"🔑 **Unique Reference ID** : `{user_id}`\n"
+            f"🏅 **System Rank Tier**    : `★ {user_data['plan'] if not is_admin else 'Executive Admin'}`\n"
+            f"⚡ **Token Performance**   : {usage_text}\n"
+            f"🤝 **Affiliate Count**    : `{user_data['referral_count']}` Node connections\n"
+            f"⏳ **Subscription Cycle**  : `{user_data['premium_expiry']}`"
         )
         await event.reply(profile_ui, parse_mode='markdown')
 
-    elif selection == '📖 Instruction Guide':
-        guide_ui = (
-            f"📖 **OPERATIONAL BLUEPRINT ENGINE USER GUIDE**\n"
+    elif action_text == "🎁 Free Daily Token":
+        now = datetime.now()
+        can_claim = True
+        if user_data['last_reward_time']:
+            try:
+                last_claim = datetime.strptime(user_data['last_reward_time'], "%Y-%m-%d %H:%M:%S")
+                if now - last_claim < timedelta(hours=24):
+                    can_claim = False
+                    rem = timedelta(hours=24) - (now - last_claim)
+                    hours, remainder = divmod(rem.seconds, 3600)
+                    await event.reply(f"🔒 **Quota Locked!** Daily rewards bundle cycle resets in `{hours}` hours manually.")
+            except Exception: pass
+            
+        if can_claim:
+            bonus = random.randint(1, 5)
+            await DatabaseManager.update_user_reward(user_id, bonus, now.strftime("%Y-%m-%d %H:%M:%S"))
+            await event.reply(f"🎁 **Bonus Granted Successfully!** Loaded `+{bonus}` permanent queries balance onto your core layer structure.")
+
+    elif action_text == "🎟️ Redeem Coupon Voucher":
+        COUPON_INPUT_CACHE[user_id] = True
+        await event.reply("🎟️ **Enter Voucher Code**:\n\nType or paste your alphanumeric coupon token vector directly into the active text input layout manual workspace box below:")
+
+    elif action_text == "👑 Upgrade Premium Tiers":
+        upgrade_ui = (
+            f"💎 *PREMIUM SERVICE TIERS & DEPLOYMENTS*\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"1️⃣ Input explicit movie phrases inside global channel search space inputs.\n"
-            f"2️⃣ Trigger pagination navigational grids instantly using inline interfaces.\n"
-            f"3️⃣ Download operations stream direct system payloads seamlessly on demand.\n"
-            f"4️⃣ Internal media items execute cloud cache automated elimination rules inside 60 seconds."
+            f"🥈 **Silver Pass Variant** - 30 Search allocations/Day\n"
+            f"💰 Cost Parameters: `₹29 INR` / `50 Telegram Stars` per 30 days\n\n"
+            f"🥇 **Gold Pass Variant** - 60 Search allocations/Day\n"
+            f"💰 Cost Parameters: `₹49 INR` / `100 Telegram Stars` per 30 days\n\n"
+            f"👑 **Elite Mega Pass** - 300 Search allocations/Day\n"
+            f"💰 Cost Parameters: `₹149 INR` / `250 Telegram Stars` per 30 days\n\n"
+            f"👉 *Tap any inline trigger asset down below to open structural checkout interfaces instantly:*"
         )
-        await event.reply(guide_ui, parse_mode='markdown')
+        buttons = [
+            [Button.inline("🥈 Silver (₹29)", b"pay_Silver_29"), Button.inline("⭐️ Silver (50★)", b"stars_Silver_50")],
+            [Button.inline("🥇 Gold (₹49)", b"pay_Gold_49"), Button.inline("⭐️ Gold (100★)", b"stars_Gold_100")],
+            [Button.inline("👑 Elite (₹149)", b"pay_Elite_149"), Button.inline("⭐️ Elite (250★)", b"stars_Elite_250")]
+        ]
+        await event.reply(upgrade_ui, buttons=buttons, parse_mode='markdown')
 
 # ====================================================================
-#                   🎛️ INTERACTIVE UI CALLBACK ROUTER
+#                   🎛️ INLINE CALLBACK ACTIONS ROUTER
 # ====================================================================
 @client.on(events.CallbackQuery)
 async def on_interactive_callback(event):
@@ -643,20 +615,18 @@ async def on_interactive_callback(event):
     if user_data and user_data['banned'] == 1:
         await event.answer("⚠️ Session Terminated.", alert=True)
         return
-        
+
     if action.startswith(b'stars_'):
         _, tier, stars_cost = action.decode('utf-8').split('_')
         stars_ui = (
-            f"⭐ **TELEGRAM STARS SECURE INBOUND PAYMENT**\n"
+            f"⭐ *TELEGRAM STARS SECURE INBOUND PAYMENT*\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
             f"📦 **Selected Plan Package**: `{tier} Account Tier Upgrade`\n"
             f"💰 **Total Asset Value**     : `{stars_cost} Telegram Stars`\n\n"
-            f"👉 Click the secure button below to route into **@Gopalji_chouney**. "
+            f"👉 Click the secure button below to route into **@Gopalji_choubey**. "
             f"Send the specified number of stars and attach a confirmation screenshot to trigger manual validation pipelines! 🎉"
         )
-        buttons = [
-            [Button.url("💬 Send Stars to Admin", "https://t.me/Gopalji_chouney")]
-        ]
+        buttons = [Button.url("💬 Send Stars to Admin", "https://t.me/Gopalji_choubey")]
         await event.edit(stars_ui, buttons=buttons, parse_mode='markdown')
 
     elif action.startswith(b'pay_'):
@@ -680,25 +650,22 @@ async def on_interactive_callback(event):
             
             await client.send_file(
                 event.chat_id, file=bio,
-                caption=f"📲 **DYNAMIC INTEGRATED UPI INBOUND GATEWAY**\n"
+                caption=f"📲 *DYNAMIC INTEGRATED UPI INBOUND GATEWAY*\n"
                         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                         f"🏅 **Target Tier Pass**: `{plan} Premium Access Bundle` \n"
                         f"💰 **Transaction Fee**  : `₹{price} INR` \n\n"
-                        f"🤳 Scan the matrix payload image above with your payment app. Once paid, **REPLY** to this image message container with your confirmation screenshot!"
+                        f"🤳 Scan the matrix payload image above with your payment app. Once paid, **REPLY** to this image message container with your confirmation screenshot!",
             )
         except ModuleNotFoundError:
-            await event.reply(
-                "⚠️ **UPI Dynamic Asset Engine Failure.**\n"
-                "Please run `pip install qrcode pillow` on the deployment machine to render instant image structures.\n\n"
-                f"Alternative raw payload copy variant string:\n`{payload}`"
-            )
+            await event.reply(f"⚠️ **UPI Engine Failure.** Alternative raw payload string:\n`{payload}`")
 
     elif action.startswith(b'get_file_'):
         parsed_args = action.decode('utf-8').split('_')
         db_flag = parsed_args[2]
         msg_id = int(parsed_args[3])
         
-        if user_data['searches_today'] >= user_data['max_limit']:
+        is_admin = int(user_id) == ADMIN_ID
+        if not is_admin and user_data['searches_today'] >= user_data['max_limit']:
             await event.answer("⚠️ Limit Saturated! Unlock access tiers for more bandwidth.", alert=True)
             return
             
@@ -730,7 +697,7 @@ async def on_interactive_callback(event):
             
             await DatabaseManager.increment_search(user_id)
             await DatabaseManager.increment_movie_download(msg_id, target_db)
-            await event.answer("📦 File dispatched seamlessly! Auto-destruction sequence engaged.", alert=False)
+            await event.answer("📦 File dispatched seamlessly!", alert=False)
             
             asyncio.create_task(scheduled_file_destruction(event.chat_id, dispatched_file, warning_notice))
             
@@ -751,7 +718,9 @@ async def on_interactive_callback(event):
         p_args = action.decode('utf-8').split('_')
         res, target_uid, pass_tier = p_args[1], p_args[2], p_args[3]
         
-        quota = int(await DatabaseManager.get_config(f'limit_{pass_tier}', '30'))
+        quota = 30
+        if pass_tier == "Gold": quota = 60
+        elif pass_tier == "Elite": quota = 300
         
         if res == "app":
             await DatabaseManager.update_premium_plan(target_uid, pass_tier, quota, 30)
@@ -759,12 +728,25 @@ async def on_interactive_callback(event):
             try: await client.send_message(int(target_uid), f"✅ *TRANSACTION VERIFIED SUCCESSFUL!*\nYour profile has been elevated to the premium **{pass_tier} Upgrade Tier Pass**.")
             except Exception: pass
             await event.edit(f"🟢 **RESOLVED**: Verified User `{target_uid}` into `{pass_tier}`.")
-            await dispatch_log(f"💰 **Subscription Upgrade Handshake Approved**: User `{target_uid}` assigned rank tier status `{pass_tier}` via Admin confirmation loops.")
+            
+            await forward_to_log_channel(
+                f"👑 <b>PREMIUM PURCHASE ACTIVATED</b>\n"
+                f"👤 <b>User ID</b>: <code>{target_uid}</code>\n"
+                f"🎖️ <b>Plan Upgraded</b>: {pass_tier}\n"
+                f"⚡ <b>New Base Allocation</b>: {quota} Daily Queries"
+            )
         else:
             await DatabaseManager.update_payment_status(target_uid, pass_tier, "Declined")
             try: await client.send_message(int(target_uid), "🔴 *TRANSACTION VERIFICATION AUDIT FAILURE EXCEPTION*")
             except Exception: pass
             await event.edit(f"🔴 **DECLINED**: Blocked order pipeline sequence for user `{target_uid}`.")
+
+    elif action == b'verify_subscription':
+        if await check_membership(event.sender_id):
+            await event.answer("✅ Subscriptions synchronized!", alert=True)
+            await send_advanced_dashboard(event.chat_id, user_id)
+        else:
+            await event.answer("❌ Subscriptions mismatch verification checks.", alert=True)
 
 # ====================================================================
 #               📊 PAGINATION VIEW VISUAL UI RENDER ENGINE
@@ -782,7 +764,7 @@ async def RenderPaginationView(event, query, matches, page=1):
     view_slice = matches[start:end]
     
     catalog_ui = (
-        f"📂 **MULTIPLE CROSS-CHANNEL INDEX SERVERS ACTIVE**\n"
+        f"📂 *MULTIPLE CROSS-CHANNEL INDEX SERVERS ACTIVE*\n"
         f"━━━━━━━🔍 Catalog Matches 🔍━━━━━━━\n"
         f"🎯 **Query Parameter** : `{query}`\n"
         f"📊 **Located Entities** : `{total_m} Files Linked` | **Page Index**: `{page}` / `{total_p}`\n"
@@ -816,8 +798,7 @@ async def RenderPaginationView(event, query, matches, page=1):
         else:
             await client.send_message(event.chat_id, catalog_ui, buttons=buttons, parse_mode='markdown')
     except telethon.errors.rpcerrorlist.MessageNotModifiedError:
-        if isinstance(event, events.CallbackQuery.Event):
-            await event.answer("ℹ️ Already displaying this page view.", alert=False)
+        pass
     except Exception:
         try: await client.send_message(event.chat_id, catalog_ui, buttons=buttons, parse_mode='markdown')
         except Exception: pass
@@ -827,15 +808,75 @@ async def RenderPaginationView(event, query, matches, page=1):
 # ====================================================================
 @client.on(events.NewMessage)
 async def core_search_router(event):
-    if event.text and event.text.startswith('/'): return
+    if event.text and (event.text.startswith('/') or event.text.strip() in [
+        "🔗 Generate Affiliate Link", "📖 System Instructions Manual", 
+        "👤 Profile Metrics", "🎁 Free Daily Token", 
+        "🎟️ Redeem Coupon Voucher", "👑 Upgrade Premium Tiers"
+    ]): return
 
     user_id = str(event.sender_id)
-    user_data = await DatabaseManager.get_user(user_id)
-    if not user_data or user_data['banned'] == 1 or user_data['verified'] == 0: return
-    if user_id in COUPON_INPUT_STATE: return
+    
+    # Check Captcha Validation Flow
+    if user_id in CAPTCHA_CACHE:
+        user_input = event.text.strip()
+        cached = CAPTCHA_CACHE[user_id]
+        if user_input.isdigit() and int(user_input) == cached["answer"]:
+            await DatabaseManager.set_verified(user_id)
+            del CAPTCHA_CACHE[user_id]
+            await event.reply("✅ *Verification Successful! Access Granted.*")
+            
+            if cached["ref"]:
+                await DatabaseManager.apply_referral_credit(cached["ref"])
+                try: 
+                    await client.send_message(
+                        int(cached["ref"]), 
+                        f"🔔 *Affiliate System Alert!*\n\nA new user (@{cached['username'] or 'Anonymous'}) joined using your node link identifier!\n➕5 Daily Token limits successfully credited to your account profile."
+                    )
+                except Exception: pass
+                
+                try:
+                    await event.reply(f"🎉 *Welcome Packet Active!*\nYou were successfully invited to our cloud network workspace system framework by user node profile sequence: `{cached['ref']}`.")
+                except Exception: pass
+            
+            await forward_to_log_channel(
+                f"👤 <b>NEW SYSTEM NODE LINK SYNCHRONIZED</b>\n"
+                f"🆔 <b>User Target ID</b>: <code>{user_id}</code>\n"
+                f"🏷️ <b>Username Tag</b>: @{cached['username']}\n"
+                f"🔗 <b>Affiliate Parent Origin Node</b>: <code>{cached['ref'] or 'Organic Unreferenced Node'}</code>\n"
+                f"🛰️ <b>Status</b>: Active Linked Sync Verification Complete"
+            )
+            await send_advanced_dashboard(event.chat_id, user_id)
+        else:
+            n1, n2, answer = generate_math_captcha()
+            CAPTCHA_CACHE[user_id]["answer"] = answer
+            await event.reply(f"❌ *Incorrect Answer.* Try again:\nSolve: `{n1} + {n2} = ?`", parse_mode='markdown')
+        return
 
-    # Intercept system dashboard strings to lock search loops out from executing them as film text strings
-    if event.text in ['🔍 Search Movies', '👥 Invite Friends', '🛒 Buy Premium', '🎫 Redeem Token', '👤 View Profile', '📖 Instruction Guide']:
+    user_data = await DatabaseManager.get_user(user_id)
+    if not user_data or user_data['banned'] == 1: return
+
+    # Check Coupon Collection Routing Mode
+    if user_id in COUPON_INPUT_CACHE:
+        voucher_input = event.text.strip()
+        del COUPON_INPUT_CACHE[user_id]
+        
+        status = await DatabaseManager.redeem_coupon(user_id, voucher_input)
+        if status == "INVALID":
+            await event.reply("❌ *Invalid Voucher Code Structure.*")
+        elif status == "EXPIRED":
+            await event.reply("❌ *This voucher code lifecycle milestone has expired.*")
+        elif status == "MAXED":
+            await event.reply("❌ *Maximum redundancy limits reached for this coupon payload.*")
+        elif status == "ALREADY_USED":
+            await event.reply("❌ *You have already claimed this token voucher pack structural allocation.*")
+        else:
+            await event.reply(f"🎉 *Success! Voucher Activated.*\n`+{status}` extra search tokens permanently added to your ceiling!")
+            await forward_to_log_channel(
+                f"🎟️ <b>COUPON REDEEMED VALIDATION RECORD</b>\n"
+                f"👤 <b>User ID</b>: <code>{user_id}</code>\n"
+                f"🔑 <b>Code String</b>: <code>{voucher_input}</code>\n"
+                f"🎁 <b>Credit Dispatched</b>: +{status} Quota Tokens"
+            )
         return
 
     if event.message.photo:
@@ -844,7 +885,7 @@ async def core_search_router(event):
             file=event.message.photo,
             buttons=[
                 [Button.inline("🥈 Verify Silver", f"adm_app_{user_id}_Silver"), Button.inline("🥇 Verify Gold", f"adm_app_{user_id}_Gold")],
-                [Button.inline("👑 Verify Elite", f"adm_app_{user_id}_Elite")],
+                [Button.inline("👑 Verify Elite (₹149)", f"adm_app_{user_id}_Elite")],
                 [Button.inline("❌ Terminate Request Order", f"adm_dec_{user_id}_None")]
             ]
         )
@@ -854,10 +895,12 @@ async def core_search_router(event):
     if not await check_membership(event.sender_id):
         lockout_ui = "⚠️ *SUBSCRIPTION REQUIRED AREA*\nYou must join our official updates channels to access the bot's features:"
         buttons = [[Button.url(f"📢 Join Channel Asset", c['link'])] for c in REQUIRED_CHANNELS]
+        buttons.append([Button.inline("🔄 Re-Verify Joining Status", b"verify_subscription")])
         await event.reply(lockout_ui, buttons=buttons, parse_mode='markdown')
         return
 
-    if user_data['searches_today'] >= user_data['max_limit']:
+    is_admin = int(user_id) == ADMIN_ID
+    if not is_admin and user_data['searches_today'] >= user_data['max_limit']:
         over_limit_ui = f"🚨 *DAILY SERVICE ALLOCATION CEILING REACHED!*\nYour account limits are currently saturated at (`{user_data['searches_today']}/{user_data['max_limit']}`)."
         await event.reply(over_limit_ui, parse_mode='markdown')
         return
@@ -865,7 +908,16 @@ async def core_search_router(event):
     query = event.text.strip() if event.text else ""
     if len(query) < 2: return
 
-    ticker = await event.respond("⚡ _Scanning clustered index vectors across all 5 source channels..._")
+    # --- CINEMATIC ANIMATED SEQUENCE ---
+    ticker = await event.respond("🔍 **SEARCHING MOVIE IN DATABASE CLUSTERS...**")
+    await asyncio.sleep(0.6)
+    await ticker.edit("⏳ **[░░░░░░░░░░] 10% Mapping Vector Paths...**")
+    await asyncio.sleep(0.4)
+    await ticker.edit("⏳ **[████░░░░░░] 45% Index Sync Matrices...**")
+    await asyncio.sleep(0.4)
+    await ticker.edit("⏳ **[██████████] 100% Core Matrix Synced Successfully!**")
+    await asyncio.sleep(0.3)
+
     matches = await DatabaseManager.query_movie_catalog(query)
 
     if not matches:
@@ -884,6 +936,34 @@ async def core_search_router(event):
 # ====================================================================
 #               👑 HIGH-TIER EXECUTION TERMINAL HANDLERS
 # ====================================================================
+@client.on(events.NewMessage(pattern=r'/make_coupon\s+(\d+)\s+(\d+)'))
+async def admin_create_coupon_handler(event):
+    if event.sender_id != ADMIN_ID: return
+    try:
+        quota = int(event.pattern_match.group(1))
+        quantity = int(event.pattern_match.group(2))
+        
+        generated_vouchers = []
+        
+        # Generates exact X individual single-use unique voucher arrays cleanly
+        for _ in range(quantity):
+            raw_token = ''.join(random.choices(string.ascii_uppercase + string.digits, k=8))
+            code = f"GC_{raw_token}"
+            await DatabaseManager.create_coupon(code, quota, max_uses=1, expiry_days=365)
+            generated_vouchers.append(code)
+            
+        compiled_list_text = "\n".join([f"🎫 `{v_code}`" for v_code in generated_vouchers])
+        
+        await event.reply(
+            f"🎟️ **BULK SINGLE-USE VOUCHERS DEPLOYED**\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"⚡ **Yield Value Each** : `+{quota} Limit Credit`\n"
+            f"📊 **Total Generated** : `{quantity} Single-Use Vouchers` \n\n"
+            f"📋 **Active Coupon Code Array List:**\n{compiled_list_text}"
+        )
+    except Exception as e:
+        await event.reply(f"❌ *Syntax Error*: `{e}`\nUsage: `/make_coupon <SEARCH_QUOTA> <QUANTITY>`")
+
 @client.on(events.NewMessage(pattern=r'/exportdb\s*(.*)'))
 async def admin_export_database(event):
     if event.sender_id != ADMIN_ID: return
@@ -921,7 +1001,7 @@ async def admin_export_database(event):
                     progress.edit(f"📤 *Live Storage Dump Progress Engine [{choice}]:*\n"
                                   f"▓▓▓▓▓▓▓░░░ {pct:.1f}%\n"
                                   f"📂 **Streaming Blocks**: `{comp}` / `{total}` disk pages\n"
-                                  f"ℹ️ Send `/adminGC cancelbackup` to interrupt execution stream immediately."),
+                                  f"ℹ️ Send `/adminGC cancelbackup` to interrupt stream."),
                     client.loop
                 )
 
@@ -1020,32 +1100,29 @@ async def admin_central_terminal_cmd(event):
     args = event.text.split(" ")
     u_c, m_a, m_b, m_c, m_d, m_e, b_c, p_c, prem_c = await DatabaseManager.get_system_stats()
     
-    s_price = await DatabaseManager.get_config('price_Silver', '29')
-    g_price = await DatabaseManager.get_config('price_Gold', '49')
-    e_price = await DatabaseManager.get_config('price_Elite', '149')
-    
-    f_lim = await DatabaseManager.get_config('limit_Free', '5')
-    s_lim = await DatabaseManager.get_config('limit_Silver', '30')
-    g_lim = await DatabaseManager.get_config('limit_Gold', '60')
-    e_lim = await DatabaseManager.get_config('limit_Elite', '300')
-
     panel = (
-        f"👑 **SYSTEM EXECUTIVE CONFIG CONSOLE** (`/adminGC`)\n"
+        f"👑 *SYSTEM MANAGEMENT EXECUTIVE LAYER v3.5* (`/adminGC`)\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"👥 Logged Profiles (CORE) : `{u_c}` | 💎 Premium Rank Access: `{prem_c}`\n"
-        f"📂 Engine A: `{m_a}` | B: `{m_b}` | C: `{m_c}` | D: `{m_d}` | E: `{m_e}`\n"
-        f"🚫 Banned Nodes: `{b_c}` | ⏳ Pending Invoices: `{p_c}`\n\n"
-        f"⚙️ **DYNAMIC SYSTEM PRICE CONFIG MATRIX**\n"
-        f"🥈 Silver Pass Price: `₹{s_price}` | 🥇 Gold Pass: `₹{g_price}` | 👑 Elite Pass: `₹{e_price}`\n"
-        f"⚡ Quotas Max/Day -> Free:`{f_lim}` | Silv:`{s_lim}` | Gold:`{g_lim}` | Elite:`{e_lim}`\n\n"
-        f"🛠️ **ADMIN MANAGEMENT CAPABILITIES**\n"
-        f"🔹 `/adminGC setprice <Silver/Gold/Elite> <Value>`\n"
-        f"🔹 `/adminGC setlimit <Free/Silver/Gold/Elite> <Amount>`\n"
-        f"🔹 `/adminGC coupon create <CODE> <MAX_USES> <REWARD>`\n"
-        f"🔹 `/adminGC ban/unban <user_id>`\n"
+        f"⚙️ **QUAD-CLUSTER STORAGE MATRIX STATUS**\n"
+        f"👥 Logged Profiles (CORE)      : `{u_c}` accounts\n"
+        f"💎 Premium Rank Access         : `{prem_c}` profiles\n"
+        f"📂 Engine [A] sourcechannel    : `{m_a}` documents\n"
+        f"📂 Engine [B] allanimedb        : `{m_b}` documents\n"
+        f"📂 Engine [C] ritsam1           : `{m_c}` documents\n"
+        f"📂 Engine [D] ritsam3           : `{m_d}` documents\n"
+        f"📂 Engine [E] ritsam48          : `{m_e}` documents\n"
+        f"🚫 Intercepted Banned Blocks   : `{b_c}` nodes\n"
+        f"⏳ Unresolved Pending Invoices : `{p_c}` invoices\n\n"
+        f"🛠️ **ADMIN ACTIONS CONSOLE**\n"
+        f"🔹 `/make_coupon <quota> <quantity>`\n"
+        f"🔹 `/adminGC ban <user_id>`\n"
+        f"🔹 `/adminGC unban <user_id>`\n"
         f"🔹 `/adminGC addquota <user_id> <amount>`\n"
-        f"🔹 `/adminGC reset` | `/adminGC cancelbackup`\n"
-        f"🔹 `/adminGC broadcast <text message>`"
+        f"🔹 `/adminGC reset` (Resets daily use metrics)\n"
+        f"🔹 `/adminGC cancelbackup` (Force abort database backups)\n"
+        f"🔹 `/adminGC broadcast <text message>`\n\n"
+        f"📤 **EXPORT OPTIONS**\n"
+        f"Syntax: `/exportdb CORE` | `A` | `B` | `C` | `D` | `E`"
     )
     
     if len(args) == 1:
@@ -1054,40 +1131,13 @@ async def admin_central_terminal_cmd(event):
         
     cmd = args[1].lower()
     
-    if cmd == "setprice" and len(args) > 3:
-        target_tier = args[2].capitalize()
-        new_val = args[3]
-        if target_tier in ['Silver', 'Gold', 'Elite']:
-            await DatabaseManager.set_config(f'price_{target_tier}', new_val)
-            await event.reply(f"✅ Pricing parameter matrix modified: Premium tier bundle **{target_tier}** adjusted to **₹{new_val}**.")
-            
-    elif cmd == "setlimit" and len(args) > 3:
-        target_tier = args[2].capitalize()
-        new_val = args[3]
-        if target_tier in ['Free', 'Silver', 'Gold', 'Elite']:
-            await DatabaseManager.set_config(f'limit_{target_tier}', new_val)
-            await event.reply(f"✅ Daily performance metrics adjusted: Allocation threshold limit for **{target_tier}** scaled to **{new_val}** daily tokens.")
-
-    elif cmd == "coupon" and len(args) > 5 and args[2].lower() == "create":
-        code = args[3].upper()
-        max_u = int(args[4])
-        reward = int(args[5])
-        
-        async with aiosqlite.connect(DB_CORE) as db:
-            await db.execute("INSERT OR REPLACE INTO coupons (code, max_uses, current_uses, quota_reward) VALUES (?, ?, 0, ?)", (code, max_u, reward))
-            await db.commit()
-            
-        await event.reply(f"🎫 **PROMO NODECODE FORGED SUCCESSFULLY**\n\n🔑 Code: `{code}`\n👥 Capacity: `{max_u} users` \n⚡ Bonus Value: `+{reward} limits` per claim pass.")
-        await dispatch_log(f"🎫 **New System Coupon Forged**: Code `{code}` ({max_u} max claims, +{reward} quota) constructed.")
-
-    elif cmd == "cancelbackup":
+    if cmd == "cancelbackup":
         BACKUP_ABORT_SIGNAL["abort"] = True
         await event.reply("🛑 *Abort flag dispatched to live thread routines.*")
 
     elif cmd == "ban" and len(args) > 2:
         await DatabaseManager.set_user_ban_status(args[2], 1)
         await event.reply(f"🚫 Connection block applied to User `{args[2]}`.")
-        await dispatch_log(f"🚫 **Node Banned**: User account reference `{args[2]}` terminated by security layer.")
         
     elif cmd == "unban" and len(args) > 2:
         await DatabaseManager.set_user_ban_status(args[2], 0)
@@ -1111,21 +1161,13 @@ async def admin_central_terminal_cmd(event):
         status = await event.reply(f"📢 Transmitting broadcast stream into {len(users)} endpoint nodes...")
         
         success = 0
-        update_filesystem_heartbeat(f"Broadcasting to {len(users)} users initiated")
-        
         for uid in users:
             try:
                 await client.send_message(int(uid), f"📢 *GLOBAL SYSTEM ANNOUNCEMENT*\n\n{msg}")
                 success += 1
-                await asyncio.sleep(1.0)
-            except FloodWaitError as flood:
-                logger.warning(f"Hit structural flood limits. Pausing execution pipeline for {flood.seconds} seconds.")
-                await asyncio.sleep(flood.seconds)
-            except Exception: 
-                pass
-                
+                await asyncio.sleep(0.04)
+            except Exception: pass
         await status.edit(f"✅ Transmission loop complete. Sent to `{success}` users.")
-        update_filesystem_heartbeat("Global System Announcement Dispatched Complete")
 
 @client.on(events.NewMessage)
 async def admin_manual_forward_indexer(event):
@@ -1150,17 +1192,14 @@ async def admin_manual_forward_indexer(event):
 #                     🚀 BOT INITIALIZER ENGINE
 # ====================================================================
 async def main_environment_bootstrap():
-    update_filesystem_heartbeat("Starting Client Lifecycle Bootloader")
     await client.start(bot_token=BOT_TOKEN)
     await DatabaseManager.initialize()
     logger.info("⚡ Advanced 5-Database Production Engine Bootstrapped Successfully.")
-    update_filesystem_heartbeat("System Engine Online and Fully Operable")
 
 if __name__ == '__main__':
     print("---------------------------------------------------------")
     print("🚀 Running Advanced 5-Database UX Production Architecture...")
-    print("🚀 Main Config DB  Instance File: alldata.db")
-    print("🚀 Engine DB Channels Mounted   : A, B, C, D, E configurations active.")
+    print("🚀 Persistent Keyboard Controls Array Enabled.")
     print("---------------------------------------------------------")
     client.loop.run_until_complete(main_environment_bootstrap())
     client.run_until_disconnected()
