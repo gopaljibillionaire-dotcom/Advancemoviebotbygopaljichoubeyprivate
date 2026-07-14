@@ -11,6 +11,7 @@ LOG_CHANNEL_ID = -1003559645437
 # --- 📢 TARGET CHANNEL CHANNELS ---
 REQUIRED_CHANNELS = [
     {"id": -1003985304953, "link": "https://t.me/yagamicorporation"},
+    {"id": -1002304109021, "link": "https://t.me/+7q9n0MEJ0Jk1N2U1"},
 ]       
 
 CHANNEL_A_ID = -1002107962104
