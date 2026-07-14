@@ -826,16 +826,20 @@ async def RenderPaginationView(event: Any, query: str, matches: List[Dict[str, A
 @client.on(events.NewMessage)
 async def core_search_router(event: events.NewMessage.Event):
     """The central message processing pipeline that routes user queries and verifies captchas."""
-    if not event.text or not event.sender_id:
+    # FIX: Guard check modified to drop requests only if both sender_id is missing, 
+    # OR if both text and image payload parameters are empty. This lets pure photos pass.
+    if not event.sender_id or (not event.text and not event.photo):
         return
         
-    user_input_raw_text = event.text.strip()
+    user_input_raw_text = event.text.strip() if event.text else ""
     
-    if user_input_raw_text.startswith('/') or user_input_raw_text in [
-        "🔍 Start Search", "🔗 Refer Link", "👤 Profile Summary", 
-        "🎁 Daily Reward Token", "🎟️ Redeem Voucher", "👑 Premium Upgrade Upgrade Upgrade"
-    ]: 
-        return
+    # FIX: Prevent empty string commands from throwing match exceptions when the asset is a photo receipt
+    if not event.photo:
+        if user_input_raw_text.startswith('/') or user_input_raw_text in [
+            "🔍 Start Search", "🔗 Refer Link", "👤 Profile Summary", 
+            "🎁 Daily Reward Token", "🎟️ Redeem Voucher", "👑 Premium Upgrade Upgrade Upgrade"
+        ]: 
+            return
 
     user_id_string = str(event.sender_id)
     user_display_name = f"{event.sender.first_name or ''} {event.sender.last_name or ''}".strip() or "Explorer"
@@ -1088,6 +1092,3 @@ if __name__ == '__main__':
         logger.info("[!] System shutdown command received via hardware keyboard loop.")
     finally:
         logger.info("[⚠️] Infrastructure engine offline. Connection sockets safely closed.")
-# ====================================================================
-#                     🏁 END OF PRODUCTION CORE FILE
-# ====================================================================
