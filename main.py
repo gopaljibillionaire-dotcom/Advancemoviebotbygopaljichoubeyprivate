@@ -81,7 +81,6 @@ ACTIVE_USER_INTERACTION_SEMAPHORES: Dict[str, asyncio.Semaphore] = {}
 # ====================================================================
 #               🚀 TELETHON INFRASTRUCTURE ENGINE CLIENT
 # ====================================================================
-# FIX: Explicitly check for or set up an active event loop before module initialization
 try:
     loop = asyncio.get_event_loop()
 except RuntimeError:
@@ -107,7 +106,6 @@ async def background_memory_sanitizer_daemon():
             current_epoch_time = time.time()
             cleaned_nodes_count = 0
             
-            # Sanitizing structural context allocations from memory frames
             for cache_store in [CAPTCHA_CACHE, COUPON_INPUT_CACHE, PAGINATION_CACHE]:
                 stale_keys = []
                 for node_key, node_value in list(cache_store.items()):
@@ -590,12 +588,20 @@ async def on_interactive_callback(event: events.CallbackQuery.Event):
         except Exception as pay_routing_anomaly:
             logger.error(f"[-] Payment gateway initialization routine failure: {pay_routing_anomaly}")
 
-    elif action_byte_sequence.startswith(b'get_file_'):
+    # ====================================================================
+    # 🌟 CORE FIXED BRANCH: PULLING METRICS VIA SECURE COMPACT FLAG (dl_)
+    # ====================================================================
+    elif action_byte_sequence.startswith(b'dl_'):
         async with acquire_user_interaction_lock(user_id_string):
             try:
+                # Decodes: "dl_a_12345"
                 separated_callback_arguments = action_byte_sequence.decode('utf-8').split('_')
-                database_source_flag = separated_callback_arguments[2]
-                target_message_index_id = int(separated_callback_arguments[3])
+                if len(separated_callback_arguments) < 3:
+                    await event.answer("❌ Metadata Payload Parsing Error.", alert=True)
+                    return
+                    
+                database_source_flag = separated_callback_arguments[1]
+                target_message_index_id = int(separated_callback_arguments[2])
                 
                 is_system_administrator = int(user_id_string) == ADMIN_ID
                 
@@ -794,7 +800,8 @@ async def RenderPaginationView(event: Any, query: str, matches: List[Dict[str, A
         else: 
             database_location_flag = 'e'
         
-        callback_payload_string = f"get_file_{database_location_flag}_{asset_row['msg_id']}"
+        # 🌟 FIXED PAYLOAD FORMAT: "dl_[db]_[msg_id]" keeping data well under Telegram limits
+        callback_payload_string = f"dl_{database_location_flag}_{asset_row['msg_id']}"
         interactive_inline_layout_matrix.append([Button.inline(compiled_button_label_tag, callback_payload_string.encode('utf-8'))])
         
     navigation_control_row = []
@@ -826,14 +833,11 @@ async def RenderPaginationView(event: Any, query: str, matches: List[Dict[str, A
 @client.on(events.NewMessage)
 async def core_search_router(event: events.NewMessage.Event):
     """The central message processing pipeline that routes user queries and verifies captchas."""
-    # FIX: Guard check modified to drop requests only if both sender_id is missing, 
-    # OR if both text and image payload parameters are empty. This lets pure photos pass.
     if not event.sender_id or (not event.text and not event.photo):
         return
         
     user_input_raw_text = event.text.strip() if event.text else ""
     
-    # FIX: Prevent empty string commands from throwing match exceptions when the asset is a photo receipt
     if not event.photo:
         if user_input_raw_text.startswith('/') or user_input_raw_text in [
             "🔍 Start Search", "🔗 Refer Link", "👤 Profile Summary", 
@@ -1080,12 +1084,10 @@ async def main_environment_bootstrap():
         sys.exit(1)
 
 if __name__ == '__main__':
-    # FIX: Clean cross-platform loop policy configuration setup
     if sys.platform == 'win32':
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
         
     try:
-        # FIX: Explicitly run the environment setup sequence cleanly on our configured loop object context
         loop.run_until_complete(main_environment_bootstrap())
         client.run_until_disconnected()
     except KeyboardInterrupt:
