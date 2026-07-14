@@ -1,12 +1,31 @@
-# database.py
 import sqlite3
 import aiosqlite
 import logging
 import re
+import math
 from datetime import datetime, timedelta
 from config import *
 
 logger = logging.getLogger("MovieQuadEngineBot")
+
+# -------------------------------------------------------------
+# 1. Helper Functions (Clean String, Similarity, & format_size)
+# -------------------------------------------------------------
+def format_size(size_bytes: int) -> str:
+    """
+    Converts file size in bytes to a human-readable format 
+    (e.g., 1024 -> '1.00 KB', 1048576 -> '1.00 MB').
+    """
+    if size_bytes == 0:
+        return "0 B"
+    size_name = ("B", "KB", "MB", "GB", "TB", "PB")
+    try:
+        i = int(math.floor(math.log(size_bytes, 1024)))
+        p = math.pow(1024, i)
+        s = round(size_bytes / p, 2)
+        return f"{s} {size_name[i]}"
+    except Exception:
+        return f"{size_bytes} B"
 
 def clean_string(text):
     text = re.sub(r'[\._\-]', ' ', text.lower())
@@ -21,6 +40,9 @@ def calculate_similarity(s1, s2):
     matches = sum(1 for w in words1 if any(w in target or target in w for target in words2))
     return matches / max(len(words1), len(words2))
 
+# -------------------------------------------------------------
+# 2. Database Manager Class
+# -------------------------------------------------------------
 class DatabaseManager:
     @staticmethod
     async def initialize():
