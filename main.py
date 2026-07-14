@@ -1,4 +1,3 @@
-
 import io
 import os
 import sys
@@ -82,9 +81,16 @@ ACTIVE_USER_INTERACTION_SEMAPHORES: Dict[str, asyncio.Semaphore] = {}
 # ====================================================================
 #               🚀 TELETHON INFRASTRUCTURE ENGINE CLIENT
 # ====================================================================
+# FIX: Explicitly check for or set up an active event loop before module initialization
+try:
+    loop = asyncio.get_event_loop()
+except RuntimeError:
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
 logger.info("[+] Instantiating high-capacity Telethon network gateway client endpoint...")
 try:
-    client = TelegramClient('movie_quad_session', API_ID, API_HASH, connection_retries=15, auto_reconnect=True)
+    client = TelegramClient('movie_quad_session', API_ID, API_HASH, connection_retries=15, auto_reconnect=True, loop=loop)
 except Exception as client_init_error:
     logger.critical(f"[-] Client initialization failed catastrophically: {client_init_error}")
     sys.exit(1)
@@ -144,7 +150,6 @@ async def check_membership(user_id: int) -> bool:
             return False
         except Exception as verification_pipeline_exception:
             logger.error(f"[-] Channel structural inspection entity mismatch check error: {verification_pipeline_exception}")
-            # Fault-tolerant baseline design: pass verification if API error is localized inside Telegram servers
             continue
     return True
 
@@ -170,10 +175,7 @@ async def scheduled_file_destruction(chat_id: int, raw_file_msg: Any, alert_noti
 #         ⌨️ PROFESSIONAL INTERACTIVE KEYBOARD INFRASTRUCTURE
 # ====================================================================
 def generate_keyboard_workspace_layout() -> types.ReplyKeyboardMarkup:
-    """
-    Constructs a clean, high-visibility layout using clear unicode markers.
-    The layout fits standard mobile screens seamlessly.
-    """
+    """Constructs a clean, high-visibility layout using clear unicode markers."""
     return types.ReplyKeyboardMarkup(
         rows=[
             types.KeyboardButtonRow(buttons=[
@@ -216,7 +218,6 @@ async def on_start_command(event: events.NewMessage.Event):
     account_username_handle = event.sender.username or "Anonymous Node"
     user_display_name = f"{event.sender.first_name or ''} {event.sender.last_name or ''}".strip() or "Valued Explorer"
     
-    # Isolate payload strings to discover hidden deep-linked references
     parsed_command_arguments = event.message.message.split(' ')
     detected_referrer_node_id = None
     
@@ -292,7 +293,6 @@ async def send_advanced_dashboard(chat_id: int, user_id_string: str, custom_name
             quota_status_micro_meter = f"⚡ `{daily_used_tokens}` / `{maximum_allowed_tokens}` Token Pools Exhausted"
             current_plan_tier_label = f"★ {user_database_metrics_profile.get('plan', 'Standard Core Free')}"
 
-        # Building out dynamic high-end UI dashboards
         premium_dashboard_render_string = (
             "💎 ══════════════════════════════ 💎\n"
             "   🎬 QUAD-ENGINE ENTERPRISE STREAM BOT v5.0\n"
@@ -341,7 +341,6 @@ async def process_keyboard_menu_commands(event: events.NewMessage.Event):
     user_id_string = str(event.sender_id)
     user_profile_record = await DatabaseManager.get_user(user_id_string)
     
-    # Security screening layers
     if not user_profile_record:
         return
     if user_profile_record.get('banned', 0) == 1 or user_profile_record.get('verified', 0) == 0:
@@ -349,7 +348,6 @@ async def process_keyboard_menu_commands(event: events.NewMessage.Event):
 
     requested_action_label = event.text.strip()
 
-    # 🔍 INTERACTION PARSER MATRIX - START SEARCH
     if requested_action_label == "🔍 Start Search":
         search_session_primed_view = (
             "🔍 ══════════════════════ 🔍\n"
@@ -362,7 +360,6 @@ async def process_keyboard_menu_commands(event: events.NewMessage.Event):
         )
         await event.reply(search_session_primed_view, parse_mode='markdown')
 
-    # 🔗 INTERACTION PARSER MATRIX - REFERRAL NODE GENERATION
     elif requested_action_label == "🔗 Refer Link":
         try:
             bot_identity_profile_cache = await client.get_me()
@@ -384,7 +381,6 @@ async def process_keyboard_menu_commands(event: events.NewMessage.Event):
         except Exception as referral_generation_error:
             logger.error(f"[-] Referral linkage mapping collapsed: {referral_generation_error}")
 
-    # 👤 INTERACTION PARSER MATRIX - PROFILE METRIC MONITORING
     elif requested_action_label == "👤 Profile Summary":
         is_system_administrator = int(user_id_string) == ADMIN_ID
         quota_metric_string = "♾️ Unlimited Balance Framework" if is_system_administrator else f"`{user_profile_record.get('searches_today', 0)}` / `{user_profile_record.get('max_limit', 10)}` Available Quota Units"
@@ -405,7 +401,6 @@ async def process_keyboard_menu_commands(event: events.NewMessage.Event):
         )
         await event.reply(account_audit_premium_view, parse_mode='markdown')
 
-    # 🎁 INTERACTION PARSER MATRIX - DAILY CEILING TOKENS
     elif requested_action_label == "🎁 Daily Reward Token":
         current_time_marker = datetime.now()
         eligibility_state_flag = True
@@ -446,7 +441,6 @@ async def process_keyboard_menu_commands(event: events.NewMessage.Event):
                 )
                 await event.reply(reward_granted_premium_view, parse_mode='markdown')
 
-    # 🎟️ INTERACTION PARSER MATRIX - VOUCHER DEPLOYMENTS
     elif requested_action_label == "🎟️ Redeem Voucher":
         COUPON_INPUT_CACHE[user_id_string] = {
             "active": True,
@@ -461,7 +455,6 @@ async def process_keyboard_menu_commands(event: events.NewMessage.Event):
         )
         await event.reply(voucher_request_premium_view, parse_mode='markdown')
 
-    # 👑 INTERACTION PARSER MATRIX - CLOUD ACCESS TIERS
     elif requested_action_label == "👑 Premium Upgrade Upgrade Upgrade":
         upgrade_catalog_premium_view = (
             "👑 ══════════════════════════════ 👑\n"
@@ -510,7 +503,6 @@ async def on_interactive_callback(event: events.CallbackQuery.Event):
         await event.answer("⚠️ Operational Error: Interaction sequence cancelled by server.", alert=True)
         return
 
-    # 🌟 STAR CHECKOUT GATEWAY ROUTING INTERFACE
     if action_byte_sequence.startswith(b'stars_'):
         try:
             _, selected_tier_label, dynamic_stars_valuation = action_byte_sequence.decode('utf-8').split('_')
@@ -535,7 +527,6 @@ async def on_interactive_callback(event: events.CallbackQuery.Event):
         except Exception as stars_routing_anomaly:
             logger.error(f"[-] Telegram star deployment system structural failure: {stars_routing_anomaly}")
 
-    # 📲 FIAT CASH UPI RUNTIME QR CODE ENGINE
     elif action_byte_sequence.startswith(b'pay_'):
         try:
             _, target_plan_variant, localized_fiat_cost = action_byte_sequence.decode('utf-8').split('_')
@@ -599,7 +590,6 @@ async def on_interactive_callback(event: events.CallbackQuery.Event):
         except Exception as pay_routing_anomaly:
             logger.error(f"[-] Payment gateway initialization routine failure: {pay_routing_anomaly}")
 
-    # 🎬 FILE EXTRACTION MAIN CONTROL SYSTEM
     elif action_byte_sequence.startswith(b'get_file_'):
         async with acquire_user_interaction_lock(user_id_string):
             try:
@@ -667,7 +657,6 @@ async def on_interactive_callback(event: events.CallbackQuery.Event):
                 logger.error(f"[-] Catalog file dispatcher pipeline crashed: {file_dispatch_critical_failure}")
                 await event.answer("❌ Server Error: Stream connection to source channel timed out.", alert=True)
 
-    # 📊 PAGINATION VIEW INTERFACE NAVIGATOR
     elif action_byte_sequence.startswith(b'page_'):
         try:
             _, targeted_page_numerical_string = action_byte_sequence.decode('utf-8').split('_')
@@ -688,7 +677,6 @@ async def on_interactive_callback(event: events.CallbackQuery.Event):
         except Exception as pagination_routing_fault:
             logger.error(f"[-] Pagination event router failed: {pagination_routing_fault}")
 
-    # 👑 MANUAL ADMIN AUDITING ACTIONS GATEWAY
     elif action_byte_sequence.startswith(b'adm_app_') or action_byte_sequence.startswith(b'adm_dec_'):
         try:
             parsed_administrative_arguments = action_byte_sequence.decode('utf-8').split('_')
@@ -746,7 +734,6 @@ async def on_interactive_callback(event: events.CallbackQuery.Event):
         except Exception as administrative_callback_processing_anomaly:
             logger.error(f"[-] Administrative inline processing function execution error: {administrative_callback_processing_anomaly}")
 
-    # 🔄 SUBSCRIPTION JOIN VERIFICATION INTERACTION PROTOCOL
     elif action_byte_sequence == b'verify_subscription':
         try:
             user_display_name = f"{event.sender.first_name or ''} {event.sender.last_name or ''}".strip() or "Explorer"
@@ -791,7 +778,6 @@ async def RenderPaginationView(event: Any, query: str, matches: List[Dict[str, A
         readable_data_volume_size = format_size(asset_row['file_size'])
         sanitized_filename_label = asset_row['file_name']
         
-        # Clean string length to prevent inline rendering overflows
         if len(sanitized_filename_label) > 42:
             sanitized_filename_label = sanitized_filename_label[:39] + "..."
             
@@ -845,7 +831,6 @@ async def core_search_router(event: events.NewMessage.Event):
         
     user_input_raw_text = event.text.strip()
     
-    # Intercept commands to keep the search stream clean
     if user_input_raw_text.startswith('/') or user_input_raw_text in [
         "🔍 Start Search", "🔗 Refer Link", "👤 Profile Summary", 
         "🎁 Daily Reward Token", "🎟️ Redeem Voucher", "👑 Premium Upgrade Upgrade Upgrade"
@@ -855,7 +840,6 @@ async def core_search_router(event: events.NewMessage.Event):
     user_id_string = str(event.sender_id)
     user_display_name = f"{event.sender.first_name or ''} {event.sender.last_name or ''}".strip() or "Explorer"
     
-    # ─── SECTION 1: SECURITY CAPTCHA INTERCEPTION ROUTE ───
     if user_id_string in CAPTCHA_CACHE:
         async with acquire_user_interaction_lock(user_id_string):
             cached_captcha_dictionary = CAPTCHA_CACHE[user_id_string]
@@ -918,7 +902,6 @@ async def core_search_router(event: events.NewMessage.Event):
     if not user_profile_dataset_record or user_profile_dataset_record.get('banned', 0) == 1: 
         return
 
-    # ─── SECTION 2: PROMOTIONAL VOUCHER DEPLOYMENT STREAM ───
     if user_id_string in COUPON_INPUT_CACHE:
         async with acquire_user_interaction_lock(user_id_string):
             targeted_voucher_code_input = user_input_raw_text.upper()
@@ -953,7 +936,6 @@ async def core_search_router(event: events.NewMessage.Event):
                 await forward_to_log_channel(coupon_log_telemetry_html)
             return
 
-    # ─── SECTION 3: INBOUND FINANCIAL TRANSACTION SCREENSHOT AUDITING ───
     if event.message.photo:
         try:
             receipt_forwarding_confirmation_interface = (
@@ -996,7 +978,6 @@ async def core_search_router(event: events.NewMessage.Event):
             logger.error(f"[-] Failed to forward incoming payment screenshot to admin: {receipt_forwarding_anomaly}")
         return
 
-    # ─── SECTION 4: MANDATORY SUBSCRIPTION ENFORCEMENT AUDITS ───
     if not await check_membership(event.sender_id):
         lockout_enforcement_interface = (
             "⚠️ ══════════════════════ ⚠️\n"
@@ -1012,7 +993,6 @@ async def core_search_router(event: events.NewMessage.Event):
         await event.reply(lockout_enforcement_interface, buttons=subscription_channel_link_matrix, parse_mode='markdown')
         return
 
-    # ─── SECTION 5: ACCOUNT DAILY RATELIMIT CONTROLS ───
     is_system_administrator = int(user_id_string) == ADMIN_ID
     if not is_system_administrator and user_profile_dataset_record['searches_today'] >= user_profile_dataset_record['max_limit']:
         over_limit_warning_interface = (
@@ -1026,13 +1006,11 @@ async def core_search_router(event: events.NewMessage.Event):
         await event.reply(over_limit_warning_interface, parse_mode='markdown')
         return
 
-    # ─── SECTION 6: HIGH-CAPACITY CROSS-CHANNEL CATALOG SEARCH QUERY EXECUTOR ───
     targeted_search_query_key = event.text.strip()
     if len(targeted_search_query_key) < 2: 
         return
 
     try:
-        # Visual transition animations to create a premium feel
         dynamic_animated_ticker_node = await event.respond("🔍 **INITIALIZING QUAD-ENGINE SEARCH MAINFRAME...**")
         await asyncio.sleep(0.4)
         await dynamic_animated_ticker_node.edit("⏳ **[████░░░░░░░░░░░] 35% Scanning Cluster File Servers...**")
@@ -1056,7 +1034,6 @@ async def core_search_router(event: events.NewMessage.Event):
             await dynamic_animated_ticker_node.edit(no_matches_found_interface, parse_mode='markdown')
             return
 
-        # Cache the current search context to handle pagination queries
         PAGINATION_CACHE[user_id_string] = {
             "query": targeted_search_query_key,
             "matches": located_catalog_index_matches,
@@ -1090,7 +1067,6 @@ async def main_environment_bootstrap():
         register_admin_handlers(client)
         logger.info("[+] Administrative system handlers active.")
         
-        # Start the background service worker loop
         asyncio.create_task(background_memory_sanitizer_daemon())
         
         bot_system_user_profile = await client.get_me()
@@ -1100,12 +1076,13 @@ async def main_environment_bootstrap():
         sys.exit(1)
 
 if __name__ == '__main__':
-    # Set execution parameters cleanly across platforms
+    # FIX: Clean cross-platform loop policy configuration setup
     if sys.platform == 'win32':
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
         
     try:
-        client.loop.run_until_complete(main_environment_bootstrap())
+        # FIX: Explicitly run the environment setup sequence cleanly on our configured loop object context
+        loop.run_until_complete(main_environment_bootstrap())
         client.run_until_disconnected()
     except KeyboardInterrupt:
         logger.info("[!] System shutdown command received via hardware keyboard loop.")
